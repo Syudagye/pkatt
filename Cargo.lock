@@ -760,13 +760,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "polkit-agent-thing"
+name = "pkatt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "color-eyre",
  "env_logger",
  "log",
+ "nix",
  "serde",
  "smol",
  "zbus",
