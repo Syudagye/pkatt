@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fs::File, io::Read, os::unix::ffi::OsStrExt};
 
 use log::debug;
 use serde::Deserialize;
+use smol::channel::Sender;
 use zbus::zvariant::{OwnedValue, Result, Type, Value};
 
 pub mod prompt;
@@ -16,12 +17,17 @@ pub fn setup_logging() {
 /// Data of an authentication session
 #[derive(Debug)]
 pub struct Session {
-    pub action_id: String,
+    /// Nature of the authentication
     pub message: String,
+    /// Icon of the application
     pub icon_name: String,
+    /// Cookied identifying the session
     pub cookie: String,
+    /// Users that can be used to authenticate
     pub identities: Vec<OwnedIdentity>,
     pub selected_identity_index: usize,
+    /// Called when the authentication is canceled by polkit
+    pub cancel_signal: Sender<()>,
 }
 
 impl Session {
@@ -57,6 +63,18 @@ impl Session {
         push_in(&id.to_string()[7..]); // Remove the "uint32 " prefix
 
         buf
+    }
+
+    pub fn serialize_users_to_prompt(&self) -> Vec<u8> {
+        self.identities
+            .iter()
+            .filter(|id| id.kind.as_str() == "unix-user")
+            .filter_map(|id| id.details.get("uid"))
+            .filter_map(|id| id.try_into().ok())
+            .filter_map(|id: u32| uzers::get_user_by_uid(id))
+            .map(|u| u.name().as_bytes().to_owned())
+            .flatten()
+            .collect()
     }
 }
 

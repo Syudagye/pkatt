@@ -5,7 +5,7 @@ use std::{
 
 use crate::Session;
 
-/// Dummy authentication methods, which does not prompt for passwork and just authenticate to
+/// Dummy authentication methods, which does not prompt for password and just authenticate to
 /// polkit using the responder
 pub fn authenticate(session: &Session) -> io::Result<ExitStatus> {
     let mut responder = Command::new("target/debug/pkatt-responder")
