@@ -1,9 +1,8 @@
-use std::{collections::HashMap, fs::File, io::Read, os::unix::ffi::OsStrExt};
+use std::{collections::HashMap, os::unix::ffi::OsStrExt};
 
 use log::debug;
 use serde::Deserialize;
-use smol::channel::Sender;
-use zbus::zvariant::{OwnedValue, Result, Type, Value};
+use zbus::zvariant::{OwnedValue, Type, Value};
 
 pub mod prompt;
 
@@ -12,6 +11,12 @@ pub fn setup_logging() {
         eprintln!("Unable to setup fancy panic messages, falling back to default panic format")
     });
     env_logger::init();
+}
+
+#[derive(Debug)]
+pub struct IdentityWrapper {
+    username: String,
+    identity: OwnedIdentity,
 }
 
 /// Data of an authentication session
@@ -24,16 +29,58 @@ pub struct Session {
     /// Cookied identifying the session
     pub cookie: String,
     /// Users that can be used to authenticate
-    pub identities: Vec<OwnedIdentity>,
-    pub selected_identity_index: usize,
-    /// Called when the authentication is canceled by polkit
-    pub cancel_signal: Sender<()>,
+    pub uid_identities: HashMap<u32, IdentityWrapper>,
 }
 
 impl Session {
+    pub fn new(
+        message: String,
+        icon_name: String,
+        cookie: String,
+        identities: Vec<Identity<'_>>,
+    ) -> Self {
+        let uid_identities: HashMap<u32, &Identity<'_>> = identities
+            .iter()
+            .filter(|i| i.kind == "unix-user")
+            .filter_map(|i| i.details.get("uid").map(|uid| (uid, i)))
+            .filter_map(|(uid, i)| TryInto::<u32>::try_into(uid).ok().map(|uid| (uid, i)))
+            .collect();
+        // TODO: error handling
+        let uid_identities: HashMap<u32, OwnedIdentity> = uid_identities
+            .into_iter()
+            .map(|(uid, id)| TryInto::<OwnedIdentity>::try_into(id).map(|id| (uid, id)))
+            .collect::<Result<HashMap<u32, OwnedIdentity>, <OwnedIdentity as TryFrom<Identity<'_>>>::Error>>(
+            )
+            .unwrap();
+        let uid_identities: HashMap<u32, IdentityWrapper> = uid_identities
+            .into_iter()
+            .filter_map(|(uid, i)| {
+                uzers::get_user_by_uid(uid)
+                    .map(|u| u.name().to_str().map(|s| s.to_string()))
+                    .flatten()
+                    .map(|n| {
+                        (
+                            uid,
+                            IdentityWrapper {
+                                username: n,
+                                identity: i,
+                            },
+                        )
+                    })
+            })
+            .collect();
+
+        Self {
+            message,
+            icon_name,
+            cookie,
+            uid_identities,
+        }
+    }
+
     /// Generates the input to give to the responder through stdin based on the session
     /// informations.
-    pub fn serialize_to_responder(&self) -> Vec<u8> {
+    pub fn serialize_to_responder(&self, uid: u32) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut push_in = |s: &str| {
             s.as_bytes().iter().for_each(|b| buf.push(*b));
@@ -43,7 +90,8 @@ impl Session {
         push_in(&nix::unistd::getuid().to_string());
         push_in(&self.cookie);
 
-        let identity = &self.identities[self.selected_identity_index];
+        let wrapper = self.uid_identities.get(&uid).unwrap();
+        let identity = &wrapper.identity;
         push_in(&identity.kind);
 
         debug!("{:?}", identity);
@@ -66,12 +114,9 @@ impl Session {
     }
 
     pub fn serialize_users_to_prompt(&self) -> Vec<u8> {
-        self.identities
-            .iter()
-            .filter(|id| id.kind.as_str() == "unix-user")
-            .filter_map(|id| id.details.get("uid"))
-            .filter_map(|id| id.try_into().ok())
-            .filter_map(|id: u32| uzers::get_user_by_uid(id))
+        self.uid_identities
+            .keys()
+            .filter_map(|&id| uzers::get_user_by_uid(id))
             .map(|u| u.name().as_bytes().to_owned())
             .flatten()
             .collect()
@@ -95,8 +140,27 @@ pub struct OwnedIdentity {
 impl<'v> TryFrom<Identity<'v>> for OwnedIdentity {
     type Error = <OwnedValue as TryFrom<Value<'v>>>::Error;
 
-    fn try_from<'i>(value: Identity<'i>) -> Result<Self> {
-        let details: Result<HashMap<String, OwnedValue>> = value
+    fn try_from<'i>(value: Identity<'i>) -> zbus::zvariant::Result<Self> {
+        let details: zbus::zvariant::Result<HashMap<String, OwnedValue>> = value
+            .details
+            .iter()
+            .map(|(&k, v)| match v.try_into() {
+                Ok(v) => Ok((k.to_owned(), v)),
+                Err(e) => Err(e),
+            })
+            .collect();
+        Ok(Self {
+            kind: value.kind.to_owned(),
+            details: details?,
+        })
+    }
+}
+
+impl<'v> TryFrom<&Identity<'v>> for OwnedIdentity {
+    type Error = <OwnedValue as TryFrom<Value<'v>>>::Error;
+
+    fn try_from<'i>(value: &Identity<'i>) -> zbus::zvariant::Result<Self> {
+        let details: zbus::zvariant::Result<HashMap<String, OwnedValue>> = value
             .details
             .iter()
             .map(|(&k, v)| match v.try_into() {

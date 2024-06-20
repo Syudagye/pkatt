@@ -1,12 +1,14 @@
 use std::{
-    collections::HashMap, env::{self, args}, ffi::CStr, future::{self, Future}, io::{Read, Write}, process::{Command, Stdio}, sync::mpsc::channel
+    collections::HashMap,
+    io::{Read, Write},
+    process::{Command, Stdio},
 };
 
 use log::{debug, error, info, trace};
-use nix::libc::getpwuid;
 use pam::Client;
-use pkatt::{prompt::authenticate, Identity, OwnedIdentity, Session};
+use pkatt::{prompt::authenticate, Identity, Session};
 use smol::{
+    channel::Sender,
     pin,
     stream::{pending, StreamExt},
 };
@@ -18,14 +20,14 @@ use zbus::{
 use zbus_polkit::policykit1::{AuthorityProxy, Subject};
 
 struct Agent {
-    sessions: HashMap<String, Session>,
+    session_cancel_signals: HashMap<String, Sender<()>>,
     promp_path: String,
 }
 
 impl Agent {
     pub fn new(promp_path: String) -> Self {
         Self {
-            sessions: HashMap::new(),
+            session_cancel_signals: HashMap::new(),
             promp_path,
         }
     }
@@ -46,29 +48,23 @@ impl Agent {
         debug!("Authentication asked !");
         debug!("action_id: {action_id}, message: {message}, icon_name: {icon_name}, details: {details:?}, cookie: {cookie}, identities: {identities:?}");
 
-        let identities = identities
-            .into_iter()
-            .map(TryFrom::try_from)
-            .collect::<Result<Vec<OwnedIdentity>, <OwnedIdentity as TryFrom<Identity<'_>>>::Error>>(
-            )
-            .unwrap();
+        let session = Session::new(
+            message.to_string(),
+            icon_name.to_string(),
+            cookie.to_string(),
+            identities,
+        );
+
         let (cancel_sender, cancel_receiver) = smol::channel::unbounded();
         pin!(cancel_receiver);
-
-        let session = Session {
-            message: message.to_string(),
-            icon_name: icon_name.to_string(),
-            cookie: cookie.to_string(),
-            identities,
-            selected_identity_index: 0,
-            cancel_signal: cancel_sender,
-        };
+        self.session_cancel_signals
+            .insert(session.cookie.clone(), cancel_sender);
 
         let users = session.serialize_users_to_prompt();
         let mut attempts = 3;
 
         loop {
-            let mut promp_child = Command::new(self.promp_path.clone())
+            let mut promp_child = Command::new(&self.promp_path)
                 .args([&session.message, &session.icon_name, &attempts.to_string()])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -104,41 +100,32 @@ impl Agent {
                 )));
             };
 
+            let uid: u32 = match uid.parse() {
+                Ok(u) => u,
+                Err(e) => {
+                    error!("Can't read uid returned by the prompt: {}", e);
+                    attempts -= 1;
+                    continue;
+                }
+            };
+
             trace!("{:?}", passwd);
 
-            let identity = session
-                .identities
-                .iter()
-                .filter(|i| i.kind.as_str() == "unix-user")
-                .filter_map(|i| {
-                    if let Some(uid) = i.details.get("uid") {
-                        Some((i, uid))
-                    } else {
-                        None
-                    }
-                })
-                .filter_map(|(id, uid)| {
-                    if let Some(uid) = uid.try_into().ok() {
-                        Some((id, uid))
-                    } else {
-                        None
-                    }
-                })
-                .find(|(_, id_uid): &(&OwnedIdentity, u32)| id_uid.to_string().as_str() == uid)
-                .map(|(id, _)| id)
-                .expect("Identity not found");
+            let Some(identity) = session.uid_identities.get(&uid) else {
+                error!("Unable to find identity for uid {}", uid);
+                return Err(zbus::fdo::Error::AuthFailed(String::from("unknown uid")));
+            };
 
             // TODO: Check passord with PAM
-            let mut auth = Client::with_password("system-auth").expect("Failed to init PAM client!");
-            // auth.conversation_mut().set_credentials("syu", passwd);
-            auth.conversation_mut()
-                .set_credentials("syu", passwd);
+            let mut auth =
+                Client::with_password("system-auth").expect("Failed to init PAM client!");
+            auth.conversation_mut().set_credentials("syu", passwd);
 
             let auth_resp = auth.authenticate();
             debug!("{:?}", auth_resp);
 
             if auth_resp.is_ok() {
-                let out = authenticate(&session);
+                let out = authenticate(&session, uid);
                 info!("Responder exit code: {}", out.unwrap());
                 break;
             }
@@ -161,8 +148,12 @@ impl Agent {
     /// CancelAuthentication method
     async fn cancel_authentication(&self, cookie: &str) -> zbus::fdo::Result<()> {
         debug!("Authentication cancled ! {cookie}");
-        let session = self.sessions.get(cookie).unwrap();
-        session.cancel_signal.send(()).await.unwrap();
+        let Some(sender) = self.session_cancel_signals.get(cookie) else {
+            error!("Unable to find session with cookie {}", cookie);
+            return Ok(());
+        };
+        // TODO; Error handling
+        sender.send(()).await.unwrap();
         Ok(())
     }
 }
