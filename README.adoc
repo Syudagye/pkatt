@@ -1,0 +1,14 @@
+= Pkatt
+
+Simple polkit agent in rust, with custom prompts !
+
+WARNING: This project is not usable as-is for now.
+
+== Running
+
+To run the agent, you need to specify which program to use as a prompt:
+
+[source,sh]
+----
+/path/to/pkatt /path/to/prompt
+----
