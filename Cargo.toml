@@ -1,26 +1,3 @@
-[package]
-name = "pkatt"
-version = "0.1.0"
-edition = "2021"
-description = "Simple polkit agent in rust"
-
-[dependencies]
-anyhow = "1.0.83"
-color-eyre = "0.6.3"
-env_logger = "0.11.3"
-log = "0.4.21"
-nix = { version = "0.28.0", default-features = false, features = ["user"] }
-pam = "0.8.0"
-serde = { version = "1.0.202", features = ["derive"] }
-smol = "2.0.0"
-uzers = "0.12.0"
-zbus = "4.2.1"
-zbus_polkit = "4.0.0"
-
-[[bin]]
-name = "pkatt"
-path = "src/bin/agent.rs"
-
-[[bin]]
-name = "pkatt-responder"
-path = "src/bin/responder.rs"
+[workspace]
+members = ["pkatt-agent"]
+resolver = "2"

@@ -1,12 +1,16 @@
 use std::{
     collections::HashMap,
-    io::{Read, Write},
+    io::Write,
     process::{Command, Stdio},
+    sync::Arc,
 };
 
-use log::{debug, error, info, trace};
-use pam::Client;
-use pkatt::{prompt::authenticate, Identity, Session};
+use log::{debug, error, info};
+use pkatt_agent::{
+    identity::BorrowedIdentity,
+    prompt::{authenticate, PromptResponse},
+    Session,
+};
 use smol::{
     channel::Sender,
     pin,
@@ -25,8 +29,8 @@ struct Agent {
 }
 
 impl Agent {
-    pub fn new(promp_path: String) -> Self {
-        Self {
+    pub fn new(promp_path: String) -> Agent {
+        Agent {
             session_cancel_signals: HashMap::new(),
             promp_path,
         }
@@ -43,24 +47,37 @@ impl Agent {
         icon_name: &str,
         details: HashMap<&str, &str>,
         cookie: &str,
-        identities: Vec<Identity<'_>>,
+        identities: Vec<BorrowedIdentity<'_>>,
     ) -> zbus::fdo::Result<()> {
         debug!("Authentication asked !");
         debug!("action_id: {action_id}, message: {message}, icon_name: {icon_name}, details: {details:?}, cookie: {cookie}, identities: {identities:?}");
 
-        let session = Session::new(
+        let session = match Session::new(
             message.to_string(),
             icon_name.to_string(),
             cookie.to_string(),
             identities,
-        );
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Error creating session: {:?}", e);
+                return Ok(());
+            }
+        };
 
         let (cancel_sender, cancel_receiver) = smol::channel::unbounded();
         pin!(cancel_receiver);
         self.session_cancel_signals
             .insert(session.cookie.clone(), cancel_sender);
 
-        let users = session.serialize_users_to_prompt();
+        let prompt_input = session.create_prompt_input();
+        let prompt_data = match serde_json::to_string(&prompt_input) {
+            Ok(data) => data,
+            Err(e) => {
+                error!("Error serializing prompt input: {}", e);
+                return Ok(());
+            }
+        };
         let mut attempts = 3;
 
         loop {
@@ -74,7 +91,8 @@ impl Agent {
             debug!("Started promp {}", self.promp_path);
 
             let mut stdin = promp_child.stdin.take().unwrap();
-            stdin.write(&users).unwrap();
+            stdin.write(&prompt_data.as_bytes()).unwrap();
+            drop(stdin);
 
             let res = smol::future::race(
                 async {
@@ -84,49 +102,45 @@ impl Agent {
                 },
                 async {
                     let exit = promp_child.wait().unwrap();
-                    Some(exit.code())
+                    Some(exit.success())
                 },
             )
             .await;
 
-            let mut stdout = promp_child.stdout.take().unwrap();
-            let mut passwd = String::new();
-            stdout.read_to_string(&mut passwd).unwrap();
-
-            let Some((uid, passwd)) = passwd.split_once(":") else {
-                error!("Malformed response from prompt");
-                return Err(zbus::fdo::Error::AuthFailed(String::from(
-                    "Prompt program returned malformed data",
-                )));
-            };
-
-            let uid: u32 = match uid.parse() {
-                Ok(u) => u,
-                Err(e) => {
-                    error!("Can't read uid returned by the prompt: {}", e);
-                    attempts -= 1;
+            match res {
+                Some(true) => (),
+                Some(false) => {
+                    info!("Prompt terminated unexpectedly, restarting it");
                     continue;
+                }
+                None => return Ok(()),
+            }
+
+            let stdout = promp_child.stdout.take().unwrap();
+            let response: PromptResponse = match serde_json::from_reader(stdout) {
+                Ok(res) => res,
+                Err(e) => {
+                    error!("Error parsing response from the prompt: {}", e);
+                    return Ok(());
                 }
             };
 
-            trace!("{:?}", passwd);
-
-            let Some(identity) = session.uid_identities.get(&uid) else {
-                error!("Unable to find identity for uid {}", uid);
-                return Err(zbus::fdo::Error::AuthFailed(String::from("unknown uid")));
-            };
-
             // TODO: Check passord with PAM
-            let mut auth =
-                Client::with_password("system-auth").expect("Failed to init PAM client!");
-            auth.conversation_mut().set_credentials("syu", passwd);
+            // let mut auth =
+            //     Client::with_password("system-auth").expect("Failed to init PAM client!");
+            // auth.conversation_mut().set_credentials("syu", passwd);
+            //
+            // let auth_resp = auth.authenticate();
+            // debug!("{:?}", auth_resp);
+            //
+            // if auth_resp.is_ok() {
+            //     let out = authenticate(&session, uid);
+            //     info!("Responder exit code: {}", out.unwrap());
+            //     break;
+            // }
 
-            let auth_resp = auth.authenticate();
-            debug!("{:?}", auth_resp);
-
-            if auth_resp.is_ok() {
-                let out = authenticate(&session, uid);
-                info!("Responder exit code: {}", out.unwrap());
+            let out = authenticate(&session, response.id).unwrap();
+            if out.success() {
                 break;
             }
 
@@ -139,7 +153,6 @@ impl Agent {
             }
 
             error!("Authentication Failed, {} attempts remaining", attempts);
-            continue;
         }
 
         Ok(())
@@ -159,7 +172,7 @@ impl Agent {
 }
 
 fn main() -> anyhow::Result<()> {
-    pkatt::setup_logging();
+    pkatt_agent::setup_logging();
 
     let promp_path = match std::env::args().skip(1).next() {
         Some(path) => path,
@@ -178,7 +191,7 @@ fn main() -> anyhow::Result<()> {
         conn.object_server().at(OBJ_PATH, agent).await?;
 
         // connect to authority
-        let proxy = AuthorityProxy::new(&conn).await?;
+        let proxy = Arc::new(AuthorityProxy::new(&conn).await?);
         let session_id = std::env::var("XDG_SESSION_ID")?;
 
         let mut details = HashMap::new();
