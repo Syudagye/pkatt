@@ -5,9 +5,10 @@ use std::{
 };
 
 use log::{debug, error, info};
+use pam::Client;
 use pkatt::{Identity, PromptResponse, Session};
 use serde::Deserialize;
-use smol::{channel::Sender, stream::StreamExt, pin};
+use smol::{channel::Sender, pin, stream::StreamExt};
 use zbus::{interface, zvariant::Type};
 
 /// Global State for the agent
@@ -104,6 +105,7 @@ impl Agent {
                 Some(true) => (),
                 Some(false) => {
                     info!("Prompt terminated unexpectedly, restarting it");
+                    attempts -= 1;
                     continue;
                 }
                 None => return Ok(()),
@@ -119,44 +121,37 @@ impl Agent {
             };
 
             // TODO: Check passord with PAM
-            // let mut auth =
-            //     Client::with_password("system-auth").expect("Failed to init PAM client!");
-            // auth.conversation_mut().set_credentials("syu", passwd);
-            //
-            // let auth_resp = auth.authenticate();
-            // debug!("{:?}", auth_resp);
-            //
-            // if auth_resp.is_ok() {
-            //     let out = authenticate(&session, uid);
-            //     info!("Responder exit code: {}", out.unwrap());
-            //     break;
-            // }
-
-            let mut responder = Command::new("target/debug/pkatt-responder")
-                .stdin(Stdio::piped())
-                .stdout(std::io::stdout())
-                .spawn()
-                .expect("Unable to spawn responder");
-
-            let data = session.create_responder_input(response.id).unwrap();
-
-            let _ = {
-                let resp_stdin = responder.stdin.take().unwrap();
-                serde_json::to_writer(resp_stdin, &data).unwrap();
+            let Some(name) = session.get_user_or_group_name(response.id) else {
+                error!("uid or gid returned by the prompt is not valid");
+                attempts -= 1;
+                continue;
             };
 
-            let resp_out = responder.wait().unwrap();
+            if authenticate(name, &response.password) {
+                let mut responder = Command::new("target/debug/pkatt-responder")
+                    .stdin(Stdio::piped())
+                    .stdout(std::io::stdout())
+                    .spawn()
+                    .expect("Unable to spawn responder");
 
-            if resp_out.success() {
-                break;
+                let data = session.create_responder_input(response.id).unwrap();
+
+                let _ = {
+                    let resp_stdin = responder.stdin.take().unwrap();
+                    serde_json::to_writer(resp_stdin, &data).unwrap();
+                };
+
+                let resp_out = responder.wait().unwrap();
+
+                if resp_out.success() {
+                    break;
+                }
             }
 
             attempts -= 1;
             if attempts == 0 {
                 error!("All attempts failed, stopping session");
-                return Err(zbus::fdo::Error::AccessDenied(String::from(
-                    "All attempts failed",
-                )));
+                return Ok(());
             }
 
             error!("Authentication Failed, {} attempts remaining", attempts);
@@ -176,6 +171,13 @@ impl Agent {
         sender.send(()).await.unwrap();
         Ok(())
     }
+}
+
+/// Attempts to authenticate the user using PAM
+fn authenticate(user: &str, password: &str) -> bool {
+    let mut auth = Client::with_password("login").expect("Failed to init PAM client!");
+    auth.conversation_mut().set_credentials(user, password);
+    auth.authenticate().is_ok()
 }
 
 /// Helper struct that implements [`serde::Deserialize`]

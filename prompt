@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# Simple demo script for a prompt.
+# To run this you will need:
+# - jq
+# - fuzzel
+
+read -r input
+
+message="$(printf '%s' $input | jq -rc '.message')"
+uid="$(printf '%s' $input | jq -rc '.users.[0].User.uid')"
+
+password=$(fuzzel --dmenu --prompt-only="Password: " --password)
+printf '{"id": %d, "password": "%s"}' $uid $password

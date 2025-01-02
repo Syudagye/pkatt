@@ -52,6 +52,14 @@ impl Session {
             users: self.identities.clone(),
         }
     }
+
+    pub fn get_user_or_group_name(&self, id: u32) -> Option<&str> {
+        self.identities.iter().find_map(|i| match i {
+            Identity::User { uid, name } if *uid == id => Some(name.as_str()),
+            Identity::Group { gid, name } if *gid == id => Some(name.as_str()),
+            _ => None,
+        })
+    }
 }
 
 /// Data passed to the responder program
