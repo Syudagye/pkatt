@@ -793,6 +793,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkatt"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nix",
+ "serde",
+ "uzers",
+]
+
+[[package]]
 name = "pkatt-agent"
 version = "0.1.0"
 dependencies = [
@@ -802,6 +812,7 @@ dependencies = [
  "log",
  "nix",
  "pam",
+ "pkatt",
  "serde",
  "serde_json",
  "smol",

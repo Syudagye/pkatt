@@ -1,10 +1,19 @@
 [package]
 name = "pkatt-agent"
+description = "pkatt agent and responder executables"
 version = "0.1.0"
 edition = "2021"
-description = "Simple polkit agent in rust"
+
+[[bin]]
+name = "pkatt"
+path = "src/bin/agent.rs"
+
+[[bin]]
+name = "pkatt-responder"
+path = "src/bin/responder.rs"
 
 [dependencies]
+pkatt = { path = "../pkatt"}
 anyhow = "1"
 color-eyre = "0.6.3"
 env_logger = "0.11.3"
@@ -17,11 +26,3 @@ smol = "2.0.0"
 uzers = "0.12"
 zbus = "5.2"
 zbus_polkit = "5.0"
-
-[[bin]]
-name = "pkatt"
-path = "src/bin/agent.rs"
-
-[[bin]]
-name = "pkatt-responder"
-path = "src/bin/responder.rs"

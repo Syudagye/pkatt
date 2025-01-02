@@ -1,0 +1,11 @@
+[package]
+name = "pkatt"
+version = "0.1.0"
+edition = "2021"
+description = "Simple polkit agent in rust"
+
+[dependencies]
+log = "0.4.21"
+nix = { version = "0.29", default-features = false, features = ["user"] }
+serde = { version = "1.0.202", features = ["derive"] }
+uzers = "0.12"
